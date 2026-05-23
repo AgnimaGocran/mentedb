@@ -12,6 +12,7 @@ categories = ["database-implementations", "data-structures"]
 
 [dependencies]
 mentedb-core = { workspace = true }
+mentedb-storage = { path = "../mentedb-storage", version = "0.9.2", optional = true }
 smallvec = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
@@ -20,6 +21,12 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = "1"
+sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[features]
+default = []
+sqlite = ["dep:sea-orm", "dep:tokio", "dep:mentedb-storage", "mentedb-storage/sqlite"]
 
 [dev-dependencies]
 uuid = { workspace = true }

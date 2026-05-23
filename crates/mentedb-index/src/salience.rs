@@ -133,8 +133,24 @@ impl SalienceIndex {
     /// Load the salience index from a file (bincode, with JSON fallback for migration).
     pub fn load(path: &std::path::Path) -> MenteResult<Self> {
         let data = std::fs::read(path)?;
-        let snapshot: SalienceSnapshot = bincode::deserialize(&data)
-            .or_else(|_| serde_json::from_slice(&data))
+        Self::deserialize(&data)
+    }
+
+    pub fn serialize(&self) -> MenteResult<Vec<u8>> {
+        let inner = self.inner.read();
+        let snapshot = SalienceSnapshot {
+            entries: inner
+                .tree
+                .iter()
+                .map(|(&k, v)| (k.to_f32(), v.clone()))
+                .collect(),
+        };
+        bincode::serialize(&snapshot).map_err(|e| MenteError::Serialization(e.to_string()))
+    }
+
+    pub fn deserialize(data: &[u8]) -> MenteResult<Self> {
+        let snapshot: SalienceSnapshot = bincode::deserialize(data)
+            .or_else(|_| serde_json::from_slice(data))
             .map_err(|e| MenteError::Serialization(e.to_string()))?;
 
         let mut tree = BTreeMap::new();

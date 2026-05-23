@@ -21,6 +21,8 @@ mentedb-embedding = { workspace = true }
 mentedb-cognitive = { workspace = true }
 mentedb-consolidation = { workspace = true }
 mentedb-extraction = { workspace = true, optional = true }
+sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -29,6 +31,7 @@ parking_lot.workspace = true
 [features]
 default = []
 enrichment = ["dep:mentedb-extraction"]
+sqlite = ["dep:sea-orm", "dep:tokio", "mentedb-storage/sqlite", "mentedb-index/sqlite", "mentedb-graph/sqlite"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

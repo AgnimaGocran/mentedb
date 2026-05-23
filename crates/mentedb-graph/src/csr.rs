@@ -430,6 +430,14 @@ impl CsrGraph {
             serde_json::from_slice(&data).map_err(|e| MenteError::Serialization(e.to_string()))?;
         Ok(graph)
     }
+
+    pub fn serialize(&self) -> MenteResult<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|e| MenteError::Serialization(e.to_string()))
+    }
+
+    pub fn deserialize(data: &[u8]) -> MenteResult<Self> {
+        serde_json::from_slice(data).map_err(|e| MenteError::Serialization(e.to_string()))
+    }
 }
 
 impl Default for CsrGraph {

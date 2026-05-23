@@ -1,55 +1,41 @@
-//! MenteDB Storage Engine: page-based storage with WAL and buffer pool.
+//! MenteDB Storage Engine.
 //!
-//! This crate implements the low-level storage engine:
-//! - **Page manager**: file-backed 64KB pages with free-list allocation
-//! - **Write-ahead log (WAL)**: append-only, CRC-checked, LZ4-compressed entries
-//! - **Buffer pool**: fixed-capacity page cache with CLOCK eviction
-//! - **Storage engine**: unified facade for memory node persistence
-//!
-//! # Concurrency
-//!
-//! Multiple processes can open the same database directory simultaneously.
-//! Writes are serialized via `flock(2)` on the WAL file; reads are lock-free.
-//! In-memory state (page count, LSN counter) is refreshed from disk under the
-//! flock so no process acts on stale data.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use mentedb_storage::StorageEngine;
-//! use mentedb_core::{MemoryNode, memory::MemoryType, types::AgentId};
-//!
-//! let engine = StorageEngine::open("/tmp/mentedb-data".as_ref())?;
-//!
-//! let node = MemoryNode::new(
-//!     AgentId::new(),
-//!     MemoryType::Episodic,
-//!     "The user prefers Rust".to_string(),
-//!     vec![0.1, 0.2, 0.3],
-//! );
-//!
-//! let page_id = engine.store_memory(&node)?;
-//! let loaded = engine.load_memory(page_id)?;
-//! assert_eq!(loaded.content, "The user prefers Rust");
-//!
-//! engine.checkpoint()?;
-//! engine.close()?;
-//! # Ok::<(), mentedb_core::error::MenteError>(())
-//! ```
+//! Two backends available via feature flags:
+//! - **default** (no features): legacy file-based storage with WAL
+//! - **sqlite**: SQLite-backed storage via SeaORM (mtdb_pages table)
 
-/// Snapshot backup utilities.
+#[cfg(not(feature = "sqlite"))]
 pub mod backup;
-/// Fixed capacity page cache with CLOCK eviction.
+#[cfg(not(feature = "sqlite"))]
 pub mod buffer;
-/// Unified storage facade for memory persistence.
+#[cfg(not(feature = "sqlite"))]
 pub mod engine;
-/// File backed 16KB page manager with free list allocation.
+#[cfg(not(feature = "sqlite"))]
 pub mod page;
-/// Append only write ahead log with CRC checks and LZ4 compression.
+#[cfg(not(feature = "sqlite"))]
 pub mod wal;
 
-// Re-export key types at crate root for convenience.
+#[cfg(feature = "sqlite")]
+pub mod entity;
+#[cfg(feature = "sqlite")]
+pub mod meta_store;
+#[cfg(feature = "sqlite")]
+pub mod page_store;
+#[cfg(feature = "sqlite")]
+pub mod serde_compat;
+#[cfg(feature = "sqlite")]
+pub mod sqlite_engine;
+
+#[cfg(not(feature = "sqlite"))]
 pub use buffer::BufferPool;
+#[cfg(not(feature = "sqlite"))]
 pub use engine::StorageEngine;
+#[cfg(not(feature = "sqlite"))]
 pub use page::{PAGE_DATA_SIZE, PAGE_SIZE, Page, PageHeader, PageId, PageType};
+#[cfg(not(feature = "sqlite"))]
 pub use wal::{Lsn, Wal, WalEntry, WalEntryType};
+
+#[cfg(feature = "sqlite")]
+pub use sqlite_engine::{PageId, SqliteStorageEngine};
+#[cfg(feature = "sqlite")]
+pub use meta_store::{load_meta, load_meta_sync, upsert_meta, upsert_meta_sync};

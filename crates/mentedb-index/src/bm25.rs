@@ -244,8 +244,27 @@ impl Bm25Index {
 
     pub fn load(path: &std::path::Path) -> MenteResult<Self> {
         let data = std::fs::read(path)?;
-        let snapshot: Bm25Snapshot = bincode::deserialize(&data)
-            .or_else(|_| serde_json::from_slice(&data))
+        Self::deserialize(&data)
+    }
+
+    pub fn serialize(&self) -> MenteResult<Vec<u8>> {
+        let inner = self.inner.read();
+        let snapshot = Bm25Snapshot {
+            inverted: inner
+                .inverted
+                .iter()
+                .map(|(k, v)| (k.clone(), v.entries.clone()))
+                .collect(),
+            doc_lengths: inner.doc_lengths.iter().map(|(&k, &v)| (k, v)).collect(),
+            doc_count: inner.doc_count,
+            total_length: inner.total_length,
+        };
+        bincode::serialize(&snapshot).map_err(|e| MenteError::Serialization(e.to_string()))
+    }
+
+    pub fn deserialize(data: &[u8]) -> MenteResult<Self> {
+        let snapshot: Bm25Snapshot = bincode::deserialize(data)
+            .or_else(|_| serde_json::from_slice(data))
             .map_err(|e| MenteError::Serialization(e.to_string()))?;
 
         let inverted = snapshot

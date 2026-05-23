@@ -44,6 +44,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "sqlite")]
+use std::sync::Arc;
+
 use mentedb_cognitive::EntityResolver;
 use mentedb_cognitive::interference::{InterferenceDetector, InterferencePair};
 use mentedb_cognitive::llm::EntityMergeGroup;
@@ -69,11 +72,14 @@ use mentedb_embedding::provider::EmbeddingProvider;
 use mentedb_graph::GraphManager;
 use mentedb_index::IndexManager;
 use mentedb_query::{Mql, QueryPlan};
+#[cfg(not(feature = "sqlite"))]
 use mentedb_storage::StorageEngine;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::SqliteStorageEngine;
+#[cfg(feature = "sqlite")]
+use sea_orm::DatabaseConnection;
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
-
-// Re-export sub-crates for direct access.
 
 /// Engine version, derived from Cargo.toml at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -114,6 +120,8 @@ pub mod prelude {
 }
 
 use mentedb_storage::PageId;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::upsert_meta_sync;
 /// Mapping from MemoryId to the storage PageId where it lives.
 use std::collections::HashMap;
 
@@ -279,14 +287,17 @@ impl Default for CognitiveConfig {
 /// takes `&self`. This allows `Arc<MenteDb>` to be shared across threads without
 /// an external `RwLock`.
 pub struct MenteDb {
+    #[cfg(not(feature = "sqlite"))]
     storage: StorageEngine,
+    #[cfg(feature = "sqlite")]
+    storage: SqliteStorageEngine,
     index: IndexManager,
     graph: GraphManager,
     /// Maps memory IDs to their storage page IDs for retrieval.
     page_map: RwLock<HashMap<MemoryId, PageId>>,
     /// Expected embedding dimension (0 = no validation).
     embedding_dim: usize,
-    /// Database directory path for persistence.
+    /// Database directory path for persistence (empty in sqlite mode).
     path: PathBuf,
     /// Optional embedding provider for auto-embedding on store and search.
     embedder: Option<Box<dyn EmbeddingProvider>>,
@@ -320,15 +331,89 @@ pub struct MenteDb {
     last_enrichment_turn: RwLock<u64>,
     /// Whether enrichment is currently pending (set by maintenance trigger).
     enrichment_pending: RwLock<bool>,
+    /// SQLite connection (set in sqlite mode, None in file mode).
+    #[cfg(feature = "sqlite")]
+    db: Option<Arc<DatabaseConnection>>,
 }
 
 impl MenteDb {
+    /// Opens (or creates) a MenteDB instance using a shared SQLite connection.
+    #[cfg(feature = "sqlite")]
+    pub fn open_sqlite(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
+        info!("Opening MenteDB with SQLite backend");
+        let storage = SqliteStorageEngine::open(&db)?;
+
+        let index = IndexManager::load_from_db(&db)
+            .unwrap_or_default();
+
+        let graph = GraphManager::load_from_db(&db)
+            .unwrap_or_else(|_| GraphManager::new());
+
+        let entries = storage.scan_all_memories();
+        let mut page_map = HashMap::new();
+        for (memory_id, page_id) in &entries {
+            page_map.insert(*memory_id, *page_id);
+        }
+        if !page_map.is_empty() {
+            info!(memories = page_map.len(), "rebuilt page map from storage");
+        }
+
+        let cognitive_config = CognitiveConfig::default();
+        let write_inference =
+            WriteInferenceEngine::with_config(cognitive_config.inference_config.clone());
+        let decay = DecayEngine::new(cognitive_config.decay_config.clone());
+        let consolidation = ConsolidationEngine::new();
+        let pain = RwLock::new(PainRegistry::new(cognitive_config.pain_max_warnings));
+        let trajectory = RwLock::new(TrajectoryTracker::new(
+            cognitive_config.trajectory_max_turns,
+        ));
+        let stream = CognitionStream::with_config(cognitive_config.stream_config.clone());
+        let phantom = RwLock::new(PhantomTracker::new(cognitive_config.phantom_config.clone()));
+        let speculative = RwLock::new(SpeculativeCache::new(
+            cognitive_config.speculative_cache_size,
+            0.5,
+            0.4,
+        ));
+        let interference = InterferenceDetector::new(cognitive_config.interference_threshold);
+        let entity_resolver = RwLock::new(EntityResolver::new());
+        let compressor = MemoryCompressor::new();
+        let archival = ArchivalPipeline::new(cognitive_config.archival_config.clone());
+
+        Ok(Self {
+            storage,
+            index,
+            graph,
+            page_map: RwLock::new(page_map),
+            embedding_dim: 0,
+            path: PathBuf::new(),
+            embedder: None,
+            cognitive_config,
+            write_inference,
+            decay,
+            consolidation,
+            pain,
+            trajectory,
+            stream,
+            phantom,
+            speculative,
+            interference,
+            entity_resolver,
+            compressor,
+            archival,
+            last_enrichment_turn: RwLock::new(0),
+            enrichment_pending: RwLock::new(false),
+            db: Some(db),
+        })
+    }
+
     /// Opens (or creates) a MenteDB instance at the given path.
+    #[cfg(not(feature = "sqlite"))]
     pub fn open(path: &Path) -> MenteResult<Self> {
         Self::open_with_config(path, CognitiveConfig::default())
     }
 
     /// Opens a MenteDB instance with custom cognitive configuration.
+    #[cfg(not(feature = "sqlite"))]
     pub fn open_with_config(path: &Path, cognitive_config: CognitiveConfig) -> MenteResult<Self> {
         info!("Opening MenteDB at {}", path.display());
         let storage = StorageEngine::open(path)?;
@@ -418,10 +503,13 @@ impl MenteDb {
             archival,
             last_enrichment_turn: RwLock::new(0),
             enrichment_pending: RwLock::new(false),
+            #[cfg(feature = "sqlite")]
+            db: None,
         })
     }
 
     /// Opens a MenteDB instance with a configured embedding provider.
+    #[cfg(not(feature = "sqlite"))]
     pub fn open_with_embedder(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -433,6 +521,7 @@ impl MenteDb {
     }
 
     /// Opens a MenteDB instance with both embedder and cognitive config.
+    #[cfg(not(feature = "sqlite"))]
     pub fn open_with_embedder_and_config(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -1220,7 +1309,16 @@ impl MenteDb {
                 indexed += 1;
             }
         }
-        self.index.save(&self.path.join("indexes"))?;
+
+        #[cfg(feature = "sqlite")]
+        if let Some(ref db) = self.db {
+            self.index.save_to_db(db)?;
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            self.index.save(&self.path.join("indexes"))?;
+        }
+
         info!(indexed, total, "index rebuild complete");
         Ok(indexed)
     }
@@ -1230,28 +1328,40 @@ impl MenteDb {
     /// Call this periodically to ensure cross-session persistence.
     /// Unlike `close()`, the database remains usable after flushing.
     pub fn flush(&self) -> MenteResult<()> {
-        debug!("Flushing MenteDB to disk");
-        self.index.save(&self.path.join("indexes"))?;
-        self.graph.save(&self.path.join("graph"))?;
-        self.storage.checkpoint()?;
+        debug!("Flushing MenteDB");
 
-        // Persist cognitive subsystem state.
-        let cognitive_dir = self.path.join("cognitive");
-        if std::fs::create_dir_all(&cognitive_dir).is_ok() {
-            let _ = self
-                .trajectory
-                .read()
-                .transitions
-                .save(&cognitive_dir.join("transitions.json"), 1);
-            let _ = self
-                .speculative
-                .read()
-                .save(&cognitive_dir.join("speculative.json"), 0);
-            let _ = self
-                .entity_resolver
-                .read()
-                .save(&cognitive_dir.join("entities.json"));
+        #[cfg(feature = "sqlite")]
+        if let Some(ref db) = self.db {
+            self.index.save_to_db(db)?;
+            self.graph.save_to_db(db)?;
+            self.storage.checkpoint()?;
+            return Ok(());
         }
+
+        #[cfg(not(feature = "sqlite"))]
+        {
+            self.index.save(&self.path.join("indexes"))?;
+            self.graph.save(&self.path.join("graph"))?;
+            self.storage.checkpoint()?;
+
+            let cognitive_dir = self.path.join("cognitive");
+            if std::fs::create_dir_all(&cognitive_dir).is_ok() {
+                let _ = self
+                    .trajectory
+                    .read()
+                    .transitions
+                    .save(&cognitive_dir.join("transitions.json"), 1);
+                let _ = self
+                    .speculative
+                    .read()
+                    .save(&cognitive_dir.join("speculative.json"), 0);
+                let _ = self
+                    .entity_resolver
+                    .read()
+                    .save(&cognitive_dir.join("entities.json"));
+            }
+        }
+
         Ok(())
     }
 

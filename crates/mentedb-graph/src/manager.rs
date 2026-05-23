@@ -7,6 +7,13 @@ use mentedb_core::error::{MenteError, MenteResult};
 use mentedb_core::types::MemoryId;
 use parking_lot::RwLock;
 
+#[cfg(feature = "sqlite")]
+use sea_orm::DatabaseConnection;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::upsert_meta_sync;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::load_meta_sync;
+
 use crate::belief::propagate_update;
 use crate::contradiction::find_contradictions;
 use crate::csr::CsrGraph;
@@ -39,6 +46,27 @@ impl GraphManager {
         Ok(Self {
             graph: RwLock::new(graph),
         })
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn save_to_db(&self, db: &DatabaseConnection) -> MenteResult<()> {
+        let data = self.graph.read().serialize()?;
+        upsert_meta_sync(db, "graph", &data)
+            .map_err(|e| MenteError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn load_from_db(db: &DatabaseConnection) -> MenteResult<Self> {
+        let data = load_meta_sync(db, "graph")
+            .map_err(|e| MenteError::Storage(e.to_string()))?;
+        match data {
+            Some(bytes) => {
+                let graph = CsrGraph::deserialize(&bytes)?;
+                Ok(Self { graph: RwLock::new(graph) })
+            }
+            None => Ok(Self::new()),
+        }
     }
 
     /// Register a memory node in the graph.

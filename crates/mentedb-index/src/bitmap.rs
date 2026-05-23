@@ -177,8 +177,29 @@ impl BitmapIndex {
     /// Load the bitmap index from a file (bincode, with JSON fallback for migration).
     pub fn load(path: &std::path::Path) -> MenteResult<Self> {
         let data = std::fs::read(path)?;
-        let snapshot: BitmapSnapshot = bincode::deserialize(&data)
-            .or_else(|_| serde_json::from_slice(&data))
+        Self::deserialize(&data)
+    }
+
+    pub fn serialize(&self) -> MenteResult<Vec<u8>> {
+        let inner = self.inner.read();
+        let mut tag_bitmaps = Vec::new();
+        for (tag, bm) in &inner.tag_bitmaps {
+            let mut buf = Vec::new();
+            bm.serialize_into(&mut buf)
+                .map_err(|e| MenteError::Serialization(e.to_string()))?;
+            tag_bitmaps.push((tag.clone(), buf));
+        }
+        let snapshot = BitmapSnapshot {
+            tag_bitmaps,
+            id_to_offset: inner.id_to_offset.iter().map(|(&k, &v)| (k, v)).collect(),
+            offset_to_id: inner.offset_to_id.clone(),
+        };
+        bincode::serialize(&snapshot).map_err(|e| MenteError::Serialization(e.to_string()))
+    }
+
+    pub fn deserialize(data: &[u8]) -> MenteResult<Self> {
+        let snapshot: BitmapSnapshot = bincode::deserialize(data)
+            .or_else(|_| serde_json::from_slice(data))
             .map_err(|e| MenteError::Serialization(e.to_string()))?;
 
         let mut tag_bitmaps = HashMap::default();

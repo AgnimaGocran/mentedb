@@ -7,6 +7,13 @@ use mentedb_core::MemoryNode;
 use mentedb_core::error::MenteResult;
 use mentedb_core::types::{MemoryId, Timestamp};
 
+#[cfg(feature = "sqlite")]
+use sea_orm::DatabaseConnection;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::upsert_meta_sync;
+#[cfg(feature = "sqlite")]
+use mentedb_storage::load_meta_sync;
+
 use crate::bitmap::BitmapIndex;
 use crate::bm25::Bm25Index;
 use crate::hnsw::{HnswConfig, HnswIndex};
@@ -92,6 +99,61 @@ impl IndexManager {
         } else {
             dir.join(format!("{name}.json"))
         }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn save_to_db(&self, db: &DatabaseConnection) -> MenteResult<()> {
+        let hnsw_data = self.hnsw.serialize()?;
+        upsert_meta_sync(db, "hnsw", &hnsw_data)
+            .map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))?;
+
+        let bm25_data = self.bm25.serialize()?;
+        upsert_meta_sync(db, "bm25", &bm25_data)
+            .map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))?;
+
+        let bitmap_data = self.bitmap.serialize()?;
+        upsert_meta_sync(db, "bitmap", &bitmap_data)
+            .map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))?;
+
+        let temporal_data = self.temporal.serialize()?;
+        upsert_meta_sync(db, "temporal", &temporal_data)
+            .map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))?;
+
+        let salience_data = self.salience.serialize()?;
+        upsert_meta_sync(db, "salience", &salience_data)
+            .map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn load_from_db(db: &DatabaseConnection) -> MenteResult<Self> {
+        let hnsw = match load_meta_sync(db, "hnsw").map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))? {
+            Some(data) => HnswIndex::deserialize(&data, HnswConfig::default().ef_search)?,
+            None => HnswIndex::new(HnswConfig::default()),
+        };
+
+        let bm25 = match load_meta_sync(db, "bm25").map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))? {
+            Some(data) => Bm25Index::deserialize(&data)?,
+            None => Bm25Index::new(),
+        };
+
+        let bitmap = match load_meta_sync(db, "bitmap").map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))? {
+            Some(data) => BitmapIndex::deserialize(&data)?,
+            None => BitmapIndex::new(),
+        };
+
+        let temporal = match load_meta_sync(db, "temporal").map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))? {
+            Some(data) => TemporalIndex::deserialize(&data)?,
+            None => TemporalIndex::new(),
+        };
+
+        let salience = match load_meta_sync(db, "salience").map_err(|e| mentedb_core::MenteError::Storage(e.to_string()))? {
+            Some(data) => SalienceIndex::deserialize(&data)?,
+            None => SalienceIndex::new(),
+        };
+
+        Ok(Self { hnsw, bm25, bitmap, temporal, salience })
     }
 
     /// Index a memory node across all indexes.
