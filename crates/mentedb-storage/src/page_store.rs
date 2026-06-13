@@ -65,7 +65,7 @@ impl SqlitePageStore {
 
         let model = model.ok_or_else(|| MenteError::Storage(format!("page {} not found", page_id)))?;
         let embedding = model.embedding.unwrap_or_default();
-        Ok(serde_compat::deserialize_node(&model.data, &embedding))
+        Ok(serde_compat::deserialize_node(&model.data, &embedding)?)
     }
 
     pub fn read_by_memory_id(&self, memory_id: MemoryId) -> MenteResult<Option<MemoryNode>> {
@@ -83,7 +83,7 @@ impl SqlitePageStore {
         match model {
             Some(m) => {
                 let embedding = m.embedding.unwrap_or_default();
-                Ok(Some(serde_compat::deserialize_node(&m.data, &embedding)))
+                Ok(Some(serde_compat::deserialize_node(&m.data, &embedding)?))
             }
             None => Ok(None),
         }

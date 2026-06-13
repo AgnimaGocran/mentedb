@@ -56,11 +56,11 @@ pub struct MemoryNode {
     pub tags: Vec<String>,
     /// When this fact became true in the real world.
     /// None means valid since creation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub valid_from: Option<Timestamp>,
     /// When this fact stopped being true.
     /// None means still valid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub valid_until: Option<Timestamp>,
 }
 
