@@ -539,6 +539,11 @@ impl MenteDb {
         self.embedder = Some(embedder);
     }
 
+    /// Set the enrichment configuration after construction.
+    pub fn set_enrichment_config(&mut self, config: EnrichmentConfig) {
+        self.cognitive_config.enrichment_config = config;
+    }
+
     /// Generate an embedding for the given text using the configured provider.
     /// Returns None if no provider is configured.
     pub fn embed_text(&self, text: &str) -> MenteResult<Option<Vec<f32>>> {
