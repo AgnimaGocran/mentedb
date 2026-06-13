@@ -21,7 +21,7 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = "1"
-sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"], optional = true }
+sea-orm = { version = "2.0.0-rc.37", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 
 [features]
