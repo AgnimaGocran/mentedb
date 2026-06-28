@@ -106,8 +106,20 @@ pub async fn run_enrichment<J: LlmJudge>(
                 batch.iter().map(|m| m.id).collect();
 
             // Get existing memories for dedup
+            let embed_input = if conversation.len() <= 500 {
+                conversation.as_str()
+            } else {
+                let end = conversation
+                    .char_indices()
+                    .take_while(|(i, _)| *i < 500)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                &conversation[..end]
+            };
+
             let existing: Vec<MemoryNode> = if let Ok(Some(emb)) =
-                db.embed_text(&conversation[..conversation.len().min(500)])
+                db.embed_text(embed_input)
             {
                 db.recall_similar(&emb, 30)
                     .unwrap_or_default()
