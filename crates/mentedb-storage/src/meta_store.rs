@@ -1,5 +1,7 @@
-use sea_orm::{DatabaseConnection, DbErr, Set, EntityTrait, ActiveModelTrait, QueryFilter, ColumnTrait};
 use crate::entity::mtdb_meta;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
+};
 
 pub async fn upsert_meta(db: &DatabaseConnection, key: &str, value: &[u8]) -> Result<(), DbErr> {
     let existing = mtdb_meta::Entity::find()
@@ -38,7 +40,5 @@ pub fn upsert_meta_sync(db: &DatabaseConnection, key: &str, value: &[u8]) -> Res
 }
 
 pub fn load_meta_sync(db: &DatabaseConnection, key: &str) -> Result<Option<Vec<u8>>, DbErr> {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(load_meta(db, key))
-    })
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(load_meta(db, key)))
 }

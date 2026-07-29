@@ -23,12 +23,14 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 rand = "0.9"
 bincode = "1"
-sea-orm = { version = "2.0.0-rc.37", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"], optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
+sea-orm = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [features]
 default = []
-sqlite = ["dep:sea-orm", "dep:tokio", "dep:mentedb-storage", "mentedb-storage/sqlite"]
+sql = ["dep:sea-orm", "dep:tokio", "dep:mentedb-storage", "mentedb-storage/sql"]
+sqlite = ["sql"]
+postgres = ["sql"]
 
 [dev-dependencies]
 rand = "0.9"

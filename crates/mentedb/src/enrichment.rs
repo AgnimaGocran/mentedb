@@ -118,9 +118,7 @@ pub async fn run_enrichment<J: LlmJudge>(
                 &conversation[..end]
             };
 
-            let existing: Vec<MemoryNode> = if let Ok(Some(emb)) =
-                db.embed_text(embed_input)
-            {
+            let existing: Vec<MemoryNode> = if let Ok(Some(emb)) = db.embed_text(embed_input) {
                 db.recall_similar(&emb, 30)
                     .unwrap_or_default()
                     .into_iter()

@@ -1,7 +1,7 @@
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "sql")]
 use sea_orm::entity::prelude::*;
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "sql")]
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "mtdb_edges")]
 pub struct Model {
@@ -17,9 +17,9 @@ pub struct Model {
     pub label: Option<String>,
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "sql")]
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "sql")]
 impl ActiveModelBehavior for ActiveModel {}

@@ -6,18 +6,21 @@ use mentedb_core::types::MemoryId;
 use sea_orm::DatabaseConnection;
 use tracing::info;
 
-use crate::page_store::SqlitePageStore;
+use crate::page_store::SqlPageStore;
 
 pub type PageId = i64;
 
-pub struct SqliteStorageEngine {
-    store: SqlitePageStore,
+pub struct SqlStorageEngine {
+    store: SqlPageStore,
 }
 
-impl SqliteStorageEngine {
+/// Backwards-compatible alias for `SqlStorageEngine`.
+pub type SqliteStorageEngine = SqlStorageEngine;
+
+impl SqlStorageEngine {
     pub fn open(db: &Arc<DatabaseConnection>) -> MenteResult<Self> {
-        let store = SqlitePageStore::new(Arc::clone(db));
-        info!("SqliteStorageEngine opened");
+        let store = SqlPageStore::new(Arc::clone(db));
+        info!("SqlStorageEngine opened");
         Ok(Self { store })
     }
 
@@ -50,7 +53,7 @@ impl SqliteStorageEngine {
     }
 
     pub fn close(&self) -> MenteResult<()> {
-        info!("SqliteStorageEngine closed");
+        info!("SqlStorageEngine closed");
         Ok(())
     }
 

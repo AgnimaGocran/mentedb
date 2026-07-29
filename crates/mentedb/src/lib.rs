@@ -42,9 +42,11 @@
 //!
 //! Source code: <https://github.com/nambok/mentedb>
 
-use std::path::{Path, PathBuf};
+#[cfg(not(feature = "sql"))]
+use std::path::Path;
+use std::path::PathBuf;
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "sql")]
 use std::sync::Arc;
 
 use mentedb_cognitive::EntityResolver;
@@ -72,13 +74,13 @@ use mentedb_embedding::provider::EmbeddingProvider;
 use mentedb_graph::GraphManager;
 use mentedb_index::IndexManager;
 use mentedb_query::{Mql, QueryPlan};
-#[cfg(not(feature = "sqlite"))]
+#[cfg(feature = "sql")]
+use mentedb_storage::SqlStorageEngine;
+#[cfg(not(feature = "sql"))]
 use mentedb_storage::StorageEngine;
-#[cfg(feature = "sqlite")]
-use mentedb_storage::SqliteStorageEngine;
-#[cfg(feature = "sqlite")]
-use sea_orm::DatabaseConnection;
 use parking_lot::RwLock;
+#[cfg(feature = "sql")]
+use sea_orm::DatabaseConnection;
 use tracing::{debug, info, warn};
 
 /// Engine version, derived from Cargo.toml at compile time.
@@ -120,8 +122,6 @@ pub mod prelude {
 }
 
 use mentedb_storage::PageId;
-#[cfg(feature = "sqlite")]
-use mentedb_storage::upsert_meta_sync;
 /// Mapping from MemoryId to the storage PageId where it lives.
 use std::collections::HashMap;
 
@@ -287,17 +287,17 @@ impl Default for CognitiveConfig {
 /// takes `&self`. This allows `Arc<MenteDb>` to be shared across threads without
 /// an external `RwLock`.
 pub struct MenteDb {
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(feature = "sql"))]
     storage: StorageEngine,
-    #[cfg(feature = "sqlite")]
-    storage: SqliteStorageEngine,
+    #[cfg(feature = "sql")]
+    storage: SqlStorageEngine,
     index: IndexManager,
     graph: GraphManager,
     /// Maps memory IDs to their storage page IDs for retrieval.
     page_map: RwLock<HashMap<MemoryId, PageId>>,
     /// Expected embedding dimension (0 = no validation).
     embedding_dim: usize,
-    /// Database directory path for persistence (empty in sqlite mode).
+    /// Database directory path for persistence (empty in sql mode).
     path: PathBuf,
     /// Optional embedding provider for auto-embedding on store and search.
     embedder: Option<Box<dyn EmbeddingProvider>>,
@@ -331,23 +331,22 @@ pub struct MenteDb {
     last_enrichment_turn: RwLock<u64>,
     /// Whether enrichment is currently pending (set by maintenance trigger).
     enrichment_pending: RwLock<bool>,
-    /// SQLite connection (set in sqlite mode, None in file mode).
-    #[cfg(feature = "sqlite")]
+    /// SQL connection (set in sql mode, None in file mode).
+    #[cfg(feature = "sql")]
     db: Option<Arc<DatabaseConnection>>,
 }
 
 impl MenteDb {
-    /// Opens (or creates) a MenteDB instance using a shared SQLite connection.
-    #[cfg(feature = "sqlite")]
-    pub fn open_sqlite(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
-        info!("Opening MenteDB with SQLite backend");
-        let storage = SqliteStorageEngine::open(&db)?;
+    /// Opens (or creates) a MenteDB instance using a shared SQL connection.
+    #[cfg(feature = "sql")]
+    pub fn open_sql(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
+        info!("Opening MenteDB with SQL backend");
+        mentedb_storage::ensure_schema_sync(&db).map_err(|e| MenteError::Storage(e.to_string()))?;
+        let storage = SqlStorageEngine::open(&db)?;
 
-        let index = IndexManager::load_from_db(&db)
-            .unwrap_or_default();
+        let index = IndexManager::load_from_db(&db).unwrap_or_default();
 
-        let graph = GraphManager::load_from_db(&db)
-            .unwrap_or_else(|_| GraphManager::new());
+        let graph = GraphManager::load_from_db(&db).unwrap_or_else(|_| GraphManager::new());
 
         let entries = storage.scan_all_memories();
         let mut page_map = HashMap::new();
@@ -406,14 +405,20 @@ impl MenteDb {
         })
     }
 
+    /// Backwards-compatible alias for `open_sql`.
+    #[cfg(feature = "sql")]
+    pub fn open_sqlite(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
+        Self::open_sql(db)
+    }
+
     /// Opens (or creates) a MenteDB instance at the given path.
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(feature = "sql"))]
     pub fn open(path: &Path) -> MenteResult<Self> {
         Self::open_with_config(path, CognitiveConfig::default())
     }
 
     /// Opens a MenteDB instance with custom cognitive configuration.
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(feature = "sql"))]
     pub fn open_with_config(path: &Path, cognitive_config: CognitiveConfig) -> MenteResult<Self> {
         info!("Opening MenteDB at {}", path.display());
         let storage = StorageEngine::open(path)?;
@@ -503,13 +508,13 @@ impl MenteDb {
             archival,
             last_enrichment_turn: RwLock::new(0),
             enrichment_pending: RwLock::new(false),
-            #[cfg(feature = "sqlite")]
+            #[cfg(feature = "sql")]
             db: None,
         })
     }
 
     /// Opens a MenteDB instance with a configured embedding provider.
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(feature = "sql"))]
     pub fn open_with_embedder(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -521,7 +526,7 @@ impl MenteDb {
     }
 
     /// Opens a MenteDB instance with both embedder and cognitive config.
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(feature = "sql"))]
     pub fn open_with_embedder_and_config(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -1315,11 +1320,11 @@ impl MenteDb {
             }
         }
 
-        #[cfg(feature = "sqlite")]
+        #[cfg(feature = "sql")]
         if let Some(ref db) = self.db {
             self.index.save_to_db(db)?;
         }
-        #[cfg(not(feature = "sqlite"))]
+        #[cfg(not(feature = "sql"))]
         {
             self.index.save(&self.path.join("indexes"))?;
         }
@@ -1335,7 +1340,7 @@ impl MenteDb {
     pub fn flush(&self) -> MenteResult<()> {
         debug!("Flushing MenteDB");
 
-        #[cfg(feature = "sqlite")]
+        #[cfg(feature = "sql")]
         if let Some(ref db) = self.db {
             self.index.save_to_db(db)?;
             self.graph.save_to_db(db)?;
@@ -1343,7 +1348,7 @@ impl MenteDb {
             return Ok(());
         }
 
-        #[cfg(not(feature = "sqlite"))]
+        #[cfg(not(feature = "sql"))]
         {
             self.index.save(&self.path.join("indexes"))?;
             self.graph.save(&self.path.join("graph"))?;
