@@ -32,6 +32,8 @@ impl SqlPageStore {
 
         let model = mtdb_page::ActiveModel {
             memory_id: Set(node.id.to_string()),
+            space_id: Set(Some(node.space_id.to_string())),
+            agent_id: Set(Some(node.agent_id.to_string())),
             data: Set(data),
             embedding: Set(emb_opt),
             created_at: Set(node.created_at as i64),
@@ -109,6 +111,8 @@ impl SqlPageStore {
         let mut active: mtdb_page::ActiveModel = existing.into();
         active.data = Set(data);
         active.embedding = Set(emb_opt);
+        active.space_id = Set(Some(node.space_id.to_string()));
+        active.agent_id = Set(Some(node.agent_id.to_string()));
         active.created_at = Set(node.created_at as i64);
 
         tokio::task::block_in_place(|| {

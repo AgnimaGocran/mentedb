@@ -8,6 +8,8 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub page_id: i64,
     pub memory_id: String,
+    pub space_id: Option<String>,
+    pub agent_id: Option<String>,
     pub data: Vec<u8>,
     pub embedding: Option<Vec<u8>>,
     pub created_at: i64,
