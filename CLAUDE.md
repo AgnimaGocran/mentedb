@@ -40,6 +40,54 @@ cargo test --workspace
 
 The server binary is `mentedb-server` and runs on axum with JWT auth, rate limiting, and WebSocket support.
 
+### Storage backends
+
+The `sql` feature is additive: it adds the SeaORM backend without removing the
+file backend. Both `MenteDb::open(path)` and `MenteDb::open_sql(conn)` are
+available in every configuration, and `mentedb_storage::Storage` holds whichever
+backend was opened. Always keep it that way, a feature that removes API breaks
+every dependent that enables it transitively.
+
+Run the suite in both configurations:
+
+```bash
+cargo test --workspace
+cargo test --workspace --features mentedb/sql,mentedb-storage/sql,mentedb-index/sql,mentedb-graph/sql
+```
+
+### Edge durability
+
+In the SQL backend edges are rows in `mtdb_edges`, written at the moment
+`relate` is called, and the CSR graph is rebuilt from those rows on open. The
+`graph` blob in `mtdb_meta` is legacy: it is migrated into rows once when rows
+are absent, and never written again.
+
+Every edge must enter the system through `MenteDb::add_edge`. Calling
+`graph.add_relationship` directly adds the edge to memory only, and it is lost
+when the process dies without a clean shutdown. Indexes and the file backend
+graph are still only persisted by `flush`, which runs on `close`.
+
+`ensure_schema` creates a unique index on the edge triple. A database that
+already contains duplicate edge rows will fail to open until they are removed.
+
+### Testing the SQL backend against PostgreSQL
+
+`crates/mentedb/tests/sql_backend.rs` runs every case against file backed SQLite
+and, when `MENTEDB_TEST_POSTGRES` is set, against PostgreSQL as well. Each case
+gets its own schema.
+
+```bash
+docker compose --profile test up -d postgres
+MENTEDB_TEST_POSTGRES=postgres://mentedb:mentedb@127.0.0.1:55432/mentedb \
+  cargo test -p mentedb --features sql --test sql_backend
+```
+
+Tests marked `#[ignore]` there document known defects and are expected to fail
+when run with `-- --ignored`. Un-ignore them as part of the fix.
+
+Note: `cargo clippy` as run in CI does not lint test targets. Use
+`cargo clippy --all-targets` when touching tests.
+
 ## Key types
 
 - `MemoryNode`: The fundamental storage unit (id, content, memory_type, embedding, metadata, timestamps)

@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
 use mentedb_core::MemoryNode;
+use mentedb_core::edge::MemoryEdge;
 use mentedb_core::error::MenteResult;
 use mentedb_core::types::MemoryId;
 use sea_orm::DatabaseConnection;
 use tracing::info;
 
+use crate::edge_store::SqlEdgeStore;
 use crate::page_store::SqlPageStore;
 
 pub type PageId = i64;
 
 pub struct SqlStorageEngine {
     store: SqlPageStore,
+    edges: SqlEdgeStore,
 }
 
 /// Backwards-compatible alias for `SqlStorageEngine`.
@@ -20,8 +23,29 @@ pub type SqliteStorageEngine = SqlStorageEngine;
 impl SqlStorageEngine {
     pub fn open(db: &Arc<DatabaseConnection>) -> MenteResult<Self> {
         let store = SqlPageStore::new(Arc::clone(db));
+        let edges = SqlEdgeStore::new(Arc::clone(db));
         info!("SqlStorageEngine opened");
-        Ok(Self { store })
+        Ok(Self { store, edges })
+    }
+
+    /// Persist an edge so it survives an unclean shutdown.
+    pub fn store_edge(&self, edge: &MemoryEdge) -> MenteResult<()> {
+        self.edges.insert(edge)
+    }
+
+    /// Load every persisted edge.
+    pub fn load_all_edges(&self) -> MenteResult<Vec<MemoryEdge>> {
+        self.edges.load_all()
+    }
+
+    /// Delete every persisted edge touching the given memory.
+    pub fn delete_edges_for_memory(&self, id: MemoryId) -> MenteResult<()> {
+        self.edges.delete_for_memory(id)
+    }
+
+    /// Number of persisted edges.
+    pub fn edge_count(&self) -> MenteResult<u64> {
+        self.edges.count()
     }
 
     pub fn store_memory(&self, node: &MemoryNode) -> MenteResult<PageId> {

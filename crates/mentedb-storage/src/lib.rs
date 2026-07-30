@@ -1,20 +1,21 @@
 //! MenteDB Storage Engine.
 //!
-//! Two backends available via feature flags:
-//! - **default** (no features): legacy file-based storage with WAL
-//! - **sql**: SQL-backed storage via SeaORM (SQLite or PostgreSQL)
+//! Two backends are available:
+//! - file based storage with WAL, always compiled
+//! - SQL storage via SeaORM (SQLite or PostgreSQL), behind the `sql` feature
+//!
+//! The `sql` feature is additive: it adds the SQL backend without removing the
+//! file backend. Use [`Storage`] to hold whichever backend was opened.
 
-#[cfg(not(feature = "sql"))]
+pub mod backend;
 pub mod backup;
-#[cfg(not(feature = "sql"))]
 pub mod buffer;
-#[cfg(not(feature = "sql"))]
 pub mod engine;
-#[cfg(not(feature = "sql"))]
 pub mod page;
-#[cfg(not(feature = "sql"))]
 pub mod wal;
 
+#[cfg(feature = "sql")]
+pub mod edge_store;
 #[cfg(feature = "sql")]
 pub mod entity;
 #[cfg(feature = "sql")]
@@ -28,13 +29,10 @@ pub mod serde_compat;
 #[cfg(feature = "sql")]
 pub mod sqlite_engine;
 
-#[cfg(not(feature = "sql"))]
+pub use backend::{PageRef, Storage};
 pub use buffer::BufferPool;
-#[cfg(not(feature = "sql"))]
 pub use engine::StorageEngine;
-#[cfg(not(feature = "sql"))]
 pub use page::{PAGE_DATA_SIZE, PAGE_SIZE, Page, PageHeader, PageId, PageType};
-#[cfg(not(feature = "sql"))]
 pub use wal::{Lsn, Wal, WalEntry, WalEntryType};
 
 #[cfg(feature = "sql")]
@@ -42,6 +40,6 @@ pub use meta_store::{load_meta, load_meta_sync, upsert_meta, upsert_meta_sync};
 #[cfg(feature = "sql")]
 pub use schema::ensure_schema_sync;
 #[cfg(feature = "sql")]
-pub use sqlite_engine::SqliteStorageEngine;
+pub use sqlite_engine::SqlStorageEngine;
 #[cfg(feature = "sql")]
-pub use sqlite_engine::{PageId, SqlStorageEngine};
+pub use sqlite_engine::SqliteStorageEngine;

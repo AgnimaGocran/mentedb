@@ -42,7 +42,6 @@
 //!
 //! Source code: <https://github.com/nambok/mentedb>
 
-#[cfg(not(feature = "sql"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -76,8 +75,7 @@ use mentedb_index::IndexManager;
 use mentedb_query::{Mql, QueryPlan};
 #[cfg(feature = "sql")]
 use mentedb_storage::SqlStorageEngine;
-#[cfg(not(feature = "sql"))]
-use mentedb_storage::StorageEngine;
+use mentedb_storage::{Storage, StorageEngine};
 use parking_lot::RwLock;
 #[cfg(feature = "sql")]
 use sea_orm::DatabaseConnection;
@@ -121,8 +119,8 @@ pub mod prelude {
     pub use crate::MenteDb;
 }
 
-use mentedb_storage::PageId;
-/// Mapping from MemoryId to the storage PageId where it lives.
+use mentedb_storage::PageRef;
+/// Mapping from MemoryId to the storage handle where it lives.
 use std::collections::HashMap;
 
 /// Configuration for sleeptime enrichment pipeline.
@@ -287,14 +285,11 @@ impl Default for CognitiveConfig {
 /// takes `&self`. This allows `Arc<MenteDb>` to be shared across threads without
 /// an external `RwLock`.
 pub struct MenteDb {
-    #[cfg(not(feature = "sql"))]
-    storage: StorageEngine,
-    #[cfg(feature = "sql")]
-    storage: SqlStorageEngine,
+    storage: Storage,
     index: IndexManager,
     graph: GraphManager,
-    /// Maps memory IDs to their storage page IDs for retrieval.
-    page_map: RwLock<HashMap<MemoryId, PageId>>,
+    /// Maps memory IDs to their storage handles for retrieval.
+    page_map: RwLock<HashMap<MemoryId, PageRef>>,
     /// Expected embedding dimension (0 = no validation).
     embedding_dim: usize,
     /// Database directory path for persistence (empty in sql mode).
@@ -342,11 +337,9 @@ impl MenteDb {
     pub fn open_sql(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
         info!("Opening MenteDB with SQL backend");
         mentedb_storage::ensure_schema_sync(&db).map_err(|e| MenteError::Storage(e.to_string()))?;
-        let storage = SqlStorageEngine::open(&db)?;
+        let storage = Storage::Sql(SqlStorageEngine::open(&db)?);
 
         let index = IndexManager::load_from_db(&db).unwrap_or_default();
-
-        let graph = GraphManager::load_from_db(&db).unwrap_or_else(|_| GraphManager::new());
 
         let entries = storage.scan_all_memories();
         let mut page_map = HashMap::new();
@@ -356,6 +349,8 @@ impl MenteDb {
         if !page_map.is_empty() {
             info!(memories = page_map.len(), "rebuilt page map from storage");
         }
+
+        let graph = Self::rebuild_graph_from_edges(&db, &storage, page_map.keys().copied())?;
 
         let cognitive_config = CognitiveConfig::default();
         let write_inference =
@@ -411,17 +406,69 @@ impl MenteDb {
         Self::open_sql(db)
     }
 
+    /// Rebuild the in memory graph from durable edge rows.
+    ///
+    /// Nodes are registered first, from the memories present in storage, because
+    /// an edge is only accepted once both endpoints exist. Edges referring to
+    /// memories that are gone are dropped.
+    ///
+    /// Databases written before edges were stored as rows kept the whole graph
+    /// in a single `graph` blob. When no rows exist but such a blob does, its
+    /// edges are migrated into rows once, so upgrading does not lose them.
+    #[cfg(feature = "sql")]
+    fn rebuild_graph_from_edges(
+        db: &Arc<DatabaseConnection>,
+        storage: &Storage,
+        memory_ids: impl Iterator<Item = MemoryId>,
+    ) -> MenteResult<GraphManager> {
+        let graph = GraphManager::new();
+        for id in memory_ids {
+            graph.add_memory(id);
+        }
+
+        let mut edges = storage.load_all_edges()?;
+        let mut migrated = 0usize;
+        if edges.is_empty() {
+            let legacy = GraphManager::load_from_db(db)
+                .map(|g| g.all_edges())
+                .unwrap_or_default();
+            for edge in &legacy {
+                // Persist first: a failure here must not leave the row store and
+                // the in memory graph disagreeing.
+                storage.store_edge(edge)?;
+                migrated += 1;
+            }
+            edges = legacy;
+        }
+
+        let mut restored = 0usize;
+        let mut dropped = 0usize;
+        for edge in &edges {
+            if graph.add_relationship(edge).is_ok() {
+                restored += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+
+        if migrated > 0 {
+            info!(migrated, "migrated graph blob into edge rows");
+        }
+        if restored > 0 || dropped > 0 {
+            info!(restored, dropped, "rebuilt graph from edge rows");
+        }
+        Ok(graph)
+    }
+
     /// Opens (or creates) a MenteDB instance at the given path.
-    #[cfg(not(feature = "sql"))]
     pub fn open(path: &Path) -> MenteResult<Self> {
         Self::open_with_config(path, CognitiveConfig::default())
     }
 
     /// Opens a MenteDB instance with custom cognitive configuration.
-    #[cfg(not(feature = "sql"))]
     pub fn open_with_config(path: &Path, cognitive_config: CognitiveConfig) -> MenteResult<Self> {
         info!("Opening MenteDB at {}", path.display());
-        let storage = StorageEngine::open(path)?;
+        let storage = Storage::File(StorageEngine::open(path)?);
 
         let index_dir = path.join("indexes");
         let graph_dir = path.join("graph");
@@ -514,7 +561,6 @@ impl MenteDb {
     }
 
     /// Opens a MenteDB instance with a configured embedding provider.
-    #[cfg(not(feature = "sql"))]
     pub fn open_with_embedder(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -526,7 +572,6 @@ impl MenteDb {
     }
 
     /// Opens a MenteDB instance with both embedder and cognitive config.
-    #[cfg(not(feature = "sql"))]
     pub fn open_with_embedder_and_config(
         path: &Path,
         embedder: Box<dyn EmbeddingProvider>,
@@ -858,7 +903,18 @@ impl MenteDb {
     /// Adds a typed, weighted edge between two memories in the graph.
     pub fn relate(&self, edge: MemoryEdge) -> MenteResult<()> {
         debug!("Relating {} -> {}", edge.source, edge.target);
-        self.graph.add_relationship(&edge)?;
+        self.add_edge(&edge)
+    }
+
+    /// Single point where edges enter the system.
+    ///
+    /// Adds the edge to the in memory graph and persists it when the backend
+    /// stores edges durably. Every edge, whether created by the caller or
+    /// inferred internally, must go through here, otherwise it is lost when the
+    /// process dies without a clean shutdown.
+    fn add_edge(&self, edge: &MemoryEdge) -> MenteResult<()> {
+        self.graph.add_relationship(edge)?;
+        self.storage.store_edge(edge)?;
         Ok(())
     }
 
@@ -883,6 +939,14 @@ impl MenteDb {
         self.page_map.read().len()
     }
 
+    /// Returns the number of edges persisted by the storage backend.
+    ///
+    /// Zero on backends that do not store edges durably, where the graph is
+    /// persisted as a whole instead.
+    pub fn edge_count(&self) -> MenteResult<u64> {
+        self.storage.edge_count()
+    }
+
     /// Removes a memory from storage, indexes, and the graph.
     pub fn forget(&self, id: MemoryId) -> MenteResult<()> {
         debug!("Forgetting memory {}", id);
@@ -894,6 +958,9 @@ impl MenteDb {
         }
 
         self.graph.remove_memory(id);
+        // Keep the row store in step with the in memory graph, otherwise the
+        // dropped edges come back the next time the database is opened.
+        self.storage.delete_edges_for_memory(id)?;
         self.page_map.write().remove(&id);
         Ok(())
     }
@@ -1002,7 +1069,7 @@ impl MenteDb {
                     "Auto-creating {:?} edge {} -> {}",
                     edge_type, source, target
                 );
-                self.graph.add_relationship(&edge)?;
+                self.add_edge(&edge)?;
             }
             InferredAction::InvalidateMemory {
                 memory,
@@ -1029,7 +1096,7 @@ impl MenteDb {
                     valid_until: None,
                     label: None,
                 };
-                self.graph.add_relationship(&edge)?;
+                self.add_edge(&edge)?;
             }
             InferredAction::MarkObsolete {
                 memory,
@@ -1054,7 +1121,7 @@ impl MenteDb {
                     valid_until: None,
                     label: None,
                 };
-                self.graph.add_relationship(&edge)?;
+                self.add_edge(&edge)?;
             }
             InferredAction::FlagContradiction {
                 existing,
@@ -1079,7 +1146,7 @@ impl MenteDb {
                     valid_until: None,
                     label: Some(reason),
                 };
-                self.graph.add_relationship(&edge)?;
+                self.add_edge(&edge)?;
             }
             InferredAction::UpdateConfidence {
                 memory,
@@ -1165,7 +1232,7 @@ impl MenteDb {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
-        let ids: Vec<(MemoryId, PageId)> = self
+        let ids: Vec<(MemoryId, PageRef)> = self
             .page_map
             .read()
             .iter()
@@ -1285,7 +1352,7 @@ impl MenteDb {
                 valid_until: None,
                 label: None,
             };
-            let _ = self.graph.add_relationship(&edge);
+            let _ = self.add_edge(&edge);
         }
 
         info!(
@@ -1323,11 +1390,11 @@ impl MenteDb {
         #[cfg(feature = "sql")]
         if let Some(ref db) = self.db {
             self.index.save_to_db(db)?;
+            info!(indexed, total, "index rebuild complete");
+            return Ok(indexed);
         }
-        #[cfg(not(feature = "sql"))]
-        {
-            self.index.save(&self.path.join("indexes"))?;
-        }
+
+        self.index.save(&self.path.join("indexes"))?;
 
         info!(indexed, total, "index rebuild complete");
         Ok(indexed)
@@ -1343,33 +1410,35 @@ impl MenteDb {
         #[cfg(feature = "sql")]
         if let Some(ref db) = self.db {
             self.index.save_to_db(db)?;
-            self.graph.save_to_db(db)?;
+            // Edges are already durable row by row. Writing the legacy graph
+            // blob as well would create a second source of truth that silently
+            // wins on the next open.
+            if !self.storage.edges_are_durable() {
+                self.graph.save_to_db(db)?;
+            }
             self.storage.checkpoint()?;
             return Ok(());
         }
 
-        #[cfg(not(feature = "sql"))]
-        {
-            self.index.save(&self.path.join("indexes"))?;
-            self.graph.save(&self.path.join("graph"))?;
-            self.storage.checkpoint()?;
+        self.index.save(&self.path.join("indexes"))?;
+        self.graph.save(&self.path.join("graph"))?;
+        self.storage.checkpoint()?;
 
-            let cognitive_dir = self.path.join("cognitive");
-            if std::fs::create_dir_all(&cognitive_dir).is_ok() {
-                let _ = self
-                    .trajectory
-                    .read()
-                    .transitions
-                    .save(&cognitive_dir.join("transitions.json"), 1);
-                let _ = self
-                    .speculative
-                    .read()
-                    .save(&cognitive_dir.join("speculative.json"), 0);
-                let _ = self
-                    .entity_resolver
-                    .read()
-                    .save(&cognitive_dir.join("entities.json"));
-            }
+        let cognitive_dir = self.path.join("cognitive");
+        if std::fs::create_dir_all(&cognitive_dir).is_ok() {
+            let _ = self
+                .trajectory
+                .read()
+                .transitions
+                .save(&cognitive_dir.join("transitions.json"), 1);
+            let _ = self
+                .speculative
+                .read()
+                .save(&cognitive_dir.join("speculative.json"), 0);
+            let _ = self
+                .entity_resolver
+                .read()
+                .save(&cognitive_dir.join("entities.json"));
         }
 
         Ok(())
@@ -1849,7 +1918,7 @@ impl MenteDb {
     /// sorted by creation time. These are the candidates for LLM extraction.
     pub fn enrichment_candidates(&self) -> Vec<MemoryNode> {
         let last_turn = *self.last_enrichment_turn.read();
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut candidates: Vec<MemoryNode> = page_ids
             .iter()
             .filter_map(|pid| self.storage.load_memory(*pid).ok())
@@ -1940,7 +2009,7 @@ impl MenteDb {
     /// Returns deduplicated, normalized entity names extracted from
     /// `entity:{name}` tags across all stored memories.
     pub fn all_entity_names(&self) -> Vec<String> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut names = std::collections::HashSet::new();
         for pid in &page_ids {
             if let Ok(mem) = self.storage.load_memory(*pid) {
@@ -1971,7 +2040,7 @@ impl MenteDb {
     /// The content helps the LLM disambiguate (e.g., "Python" near
     /// "web framework" vs "Python" near "Monty Python").
     pub fn entity_names_with_context(&self) -> Vec<(String, Option<String>)> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut entity_contexts: HashMap<String, String> = HashMap::new();
 
         for pid in &page_ids {
@@ -2228,7 +2297,7 @@ impl MenteDb {
 
     /// Build a map of normalized entity name → list of MemoryIds.
     fn build_entity_memory_map(&self) -> HashMap<String, Vec<MemoryId>> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut map: HashMap<String, Vec<MemoryId>> = HashMap::new();
         for pid in &page_ids {
             if let Ok(mem) = self.storage.load_memory(*pid) {
@@ -2247,7 +2316,7 @@ impl MenteDb {
 
     /// Get all entity memory nodes (memories tagged with `entity:{name}`).
     pub fn entity_memories(&self) -> Vec<MemoryNode> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         page_ids
             .iter()
             .filter_map(|pid| self.storage.load_memory(*pid).ok())
@@ -2260,7 +2329,7 @@ impl MenteDb {
     /// Returns a map of category → list of (entity_name, context_snippet).
     /// Categories come from `entity_type:` tags on entity memories.
     pub fn entity_communities(&self) -> HashMap<String, Vec<(String, String)>> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut categories: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
         for pid in &page_ids {
@@ -2321,7 +2390,7 @@ impl MenteDb {
 
         // Check if a community summary already exists for this category
         let community_tag = format!("community:{}", category);
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut existing_id = None;
         for pid in &page_ids {
             if let Ok(mem) = self.storage.load_memory(*pid)
@@ -2394,7 +2463,7 @@ impl MenteDb {
 
     /// Get existing community summaries.
     pub fn community_summaries(&self) -> Vec<MemoryNode> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         page_ids
             .iter()
             .filter_map(|pid| self.storage.load_memory(*pid).ok())
@@ -2406,7 +2475,7 @@ impl MenteDb {
     ///
     /// Returns high-confidence memories suitable for profile building.
     pub fn profile_facts(&self) -> Vec<String> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         let mut facts = Vec::new();
 
         for pid in &page_ids {
@@ -2443,7 +2512,7 @@ impl MenteDb {
     /// If one already exists, it's replaced entirely.
     pub fn store_user_profile(&self, profile: &str) -> MenteResult<MemoryId> {
         // Find existing profile
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         for pid in &page_ids {
             if let Ok(mem) = self.storage.load_memory(*pid)
                 && mem.tags.iter().any(|t| t == "user_profile")
@@ -2488,7 +2557,7 @@ impl MenteDb {
 
     /// Get the current user profile, if one exists.
     pub fn user_profile(&self) -> Option<MemoryNode> {
-        let page_ids: Vec<PageId> = self.page_map.read().values().copied().collect();
+        let page_ids: Vec<PageRef> = self.page_map.read().values().copied().collect();
         for pid in &page_ids {
             if let Ok(mem) = self.storage.load_memory(*pid)
                 && mem.tags.iter().any(|t| t == "user_profile")

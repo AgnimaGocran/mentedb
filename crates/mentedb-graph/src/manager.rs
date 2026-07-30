@@ -69,6 +69,30 @@ impl GraphManager {
         }
     }
 
+    /// Every edge currently in the graph, as `MemoryEdge` values.
+    ///
+    /// Used to export the graph, for example when migrating a database that
+    /// kept its edges in a single serialized blob over to row storage.
+    pub fn all_edges(&self) -> Vec<MemoryEdge> {
+        let g = self.graph.read();
+        let mut edges = Vec::new();
+        for source in g.node_ids() {
+            for (target, stored) in g.outgoing(*source) {
+                edges.push(MemoryEdge {
+                    source: *source,
+                    target,
+                    edge_type: stored.edge_type,
+                    weight: stored.weight,
+                    created_at: stored.created_at,
+                    valid_from: stored.valid_from,
+                    valid_until: stored.valid_until,
+                    label: stored.label,
+                });
+            }
+        }
+        edges
+    }
+
     /// Register a memory node in the graph.
     pub fn add_memory(&self, id: MemoryId) {
         self.graph.write().add_node(id);

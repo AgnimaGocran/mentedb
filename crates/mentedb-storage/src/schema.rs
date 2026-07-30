@@ -20,6 +20,20 @@ pub async fn ensure_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
     edge_table.if_not_exists();
     db.execute(&edge_table).await?;
 
+    // `create_table_from_entity` does not emit secondary indexes. The unique
+    // index makes an edge triple unique at the database level, so two writers
+    // cannot insert the same relationship twice. The other two support lookups
+    // by endpoint when deleting a memory's edges.
+    for stmt in [
+        "CREATE UNIQUE INDEX IF NOT EXISTS mtdb_edges_triple_uniq \
+         ON mtdb_edges (source_id, target_id, edge_type)",
+        "CREATE INDEX IF NOT EXISTS mtdb_edges_source_idx ON mtdb_edges (source_id)",
+        "CREATE INDEX IF NOT EXISTS mtdb_edges_target_idx ON mtdb_edges (target_id)",
+        "CREATE INDEX IF NOT EXISTS mtdb_pages_memory_idx ON mtdb_pages (memory_id)",
+    ] {
+        db.execute_unprepared(stmt).await?;
+    }
+
     Ok(())
 }
 

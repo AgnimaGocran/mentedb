@@ -6,5 +6,25 @@ services:
     volumes:
       - mentedb-data:/var/mentedb/data
 
+  # PostgreSQL for the sql backend test suite. Not started by default:
+  #   docker compose --profile test up -d postgres
+  # Then run the tests with:
+  #   MENTEDB_TEST_POSTGRES=postgres://mentedb:mentedb@127.0.0.1:55432/mentedb \
+  #     cargo test -p mentedb --features sql --test sql_backend
+  postgres:
+    profiles: ["test"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: mentedb
+      POSTGRES_PASSWORD: mentedb
+      POSTGRES_DB: mentedb
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mentedb -d mentedb"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   mentedb-data:
