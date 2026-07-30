@@ -5,7 +5,36 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::memory::MemoryNode;
 use crate::types::{AgentId, SpaceId, Timestamp};
+
+/// A tenant view used to scope reads and writes to a single space or agent.
+///
+/// Only the fields that are set participate in matching. When `space_id` is
+/// `None`, memories from every space are visible (subject to the `agent_id`
+/// filter, if any). A context with both fields `None` disables tenant scoping
+/// entirely and preserves backwards compatibility with single-tenant databases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenantContext {
+    pub space_id: Option<SpaceId>,
+    pub agent_id: Option<AgentId>,
+}
+
+impl TenantContext {
+    /// Create a context scoped to one space and agent.
+    pub fn new(space_id: SpaceId, agent_id: AgentId) -> Self {
+        Self {
+            space_id: Some(space_id),
+            agent_id: Some(agent_id),
+        }
+    }
+
+    /// Returns true when the memory belongs to this tenant (or no filter is set).
+    pub fn matches(&self, node: &MemoryNode) -> bool {
+        self.space_id.is_none_or(|s| s == node.space_id)
+            && self.agent_id.is_none_or(|a| a == node.agent_id)
+    }
+}
 
 /// Access permission level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

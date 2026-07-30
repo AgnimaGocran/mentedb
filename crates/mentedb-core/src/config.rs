@@ -184,6 +184,12 @@ pub struct CognitiveConfig {
     /// Maximum number of active phantom memory warnings.
     #[serde(default = "default_max_phantom_warnings")]
     pub max_phantom_warnings: usize,
+    /// Multiplicative overfetch factor for vector searches when a tenant context
+    /// is active. The global in-memory index is not per-tenant, so we fetch more
+    /// candidates and then filter by space/agent to avoid returning too few
+    /// results for a single tenant.
+    #[serde(default = "default_tenant_recall_overfetch_factor")]
+    pub tenant_recall_overfetch_factor: usize,
 }
 
 fn default_contradiction_threshold() -> f32 {
@@ -213,6 +219,9 @@ fn default_max_pain_warnings() -> usize {
 fn default_max_phantom_warnings() -> usize {
     5
 }
+fn default_tenant_recall_overfetch_factor() -> usize {
+    10
+}
 
 impl Default for CognitiveConfig {
     fn default() -> Self {
@@ -226,6 +235,7 @@ impl Default for CognitiveConfig {
             max_trajectory_turns: default_max_trajectory_turns(),
             max_pain_warnings: default_max_pain_warnings(),
             max_phantom_warnings: default_max_phantom_warnings(),
+            tenant_recall_overfetch_factor: default_tenant_recall_overfetch_factor(),
         }
     }
 }

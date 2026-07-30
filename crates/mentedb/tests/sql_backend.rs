@@ -18,6 +18,7 @@ use std::sync::Arc;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 
 use mentedb::MenteDb;
+use mentedb::core::space::TenantContext;
 use mentedb::prelude::*;
 
 /// Environment variable holding the PostgreSQL connection URL.
@@ -44,6 +45,11 @@ impl Backend {
     async fn open(&self) -> MenteDb {
         MenteDb::open_sql(self.connect().await)
             .unwrap_or_else(|e| panic!("[{}] open_sql failed: {e}", self.name))
+    }
+
+    async fn open_for(&self, tenant: TenantContext) -> MenteDb {
+        MenteDb::open_sql_with_tenant(self.connect().await, Some(tenant))
+            .unwrap_or_else(|e| panic!("[{}] open_sql_with_tenant failed: {e}", self.name))
     }
 }
 
@@ -562,5 +568,67 @@ async fn latest_version_wins_after_reopen() {
             b.name
         );
         reopened.close().expect("close");
+    }
+}
+
+/// Memories are isolated by space and agent. A tenant-scoped database can only
+/// read memories that match its context, both through direct lookups and MQL.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_isolation_filters_reads() {
+    for b in backends("tenant_isolation").await {
+        let space_a = SpaceId::new();
+        let agent_a = AgentId::new();
+        let space_b = SpaceId::new();
+        let agent_b = AgentId::new();
+
+        let db = b.open().await;
+        let mut node_a = memory("alpha fact", vec![1.0, 0.0]);
+        node_a.space_id = space_a;
+        node_a.agent_id = agent_a;
+        let id_a = node_a.id;
+
+        let mut node_b = memory("beta fact", vec![0.0, 1.0]);
+        node_b.space_id = space_b;
+        node_b.agent_id = agent_b;
+        let id_b = node_b.id;
+
+        db.store(node_a).expect("store a");
+        db.store(node_b).expect("store b");
+        db.close().expect("close");
+
+        // Tenant A only sees its own memory.
+        let db_a = b.open_for(TenantContext::new(space_a, agent_a)).await;
+        assert_eq!(db_a.memory_count(), 1, "[{}] tenant A count", b.name);
+        assert!(db_a.get_memory(id_a).is_ok(), "[{}] tenant A get a", b.name);
+        assert!(
+            db_a.get_memory(id_b).is_err(),
+            "[{}] tenant A cannot get b",
+            b.name
+        );
+
+        let hits_a = db_a.recall_similar(&[1.0, 0.0], 2).expect("recall a");
+        assert_eq!(hits_a.len(), 1, "[{}] tenant A recall count", b.name);
+        assert_eq!(hits_a[0].0, id_a, "[{}] tenant A recall id", b.name);
+
+        let window_a = db_a
+            .recall(&format!(
+                "RECALL memories NEAR [1.0, 0.0] WHERE space = {space_a} LIMIT 5"
+            ))
+            .expect("recall mql a");
+        let count_a: usize = window_a.blocks.iter().map(|b| b.memories.len()).sum();
+        assert_eq!(count_a, 1, "[{}] tenant A mql count", b.name);
+
+        // Tenant B only sees its own memory.
+        let db_b = b.open_for(TenantContext::new(space_b, agent_b)).await;
+        assert_eq!(db_b.memory_count(), 1, "[{}] tenant B count", b.name);
+        assert!(db_b.get_memory(id_b).is_ok(), "[{}] tenant B get b", b.name);
+        assert!(
+            db_b.get_memory(id_a).is_err(),
+            "[{}] tenant B cannot get a",
+            b.name
+        );
+
+        db_a.close().expect("close a");
+        db_b.close().expect("close b");
     }
 }

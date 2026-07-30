@@ -67,12 +67,13 @@ use mentedb_context::{AssemblyConfig, ContextAssembler, ContextWindow, ScoredMem
 use mentedb_core::edge::EdgeType;
 use mentedb_core::error::MenteResult;
 use mentedb_core::memory::MemoryType;
+use mentedb_core::space::TenantContext;
 use mentedb_core::types::{MemoryId, Timestamp};
 use mentedb_core::{MemoryEdge, MemoryNode, MenteError};
 use mentedb_embedding::provider::EmbeddingProvider;
 use mentedb_graph::GraphManager;
 use mentedb_index::IndexManager;
-use mentedb_query::{Mql, QueryPlan};
+use mentedb_query::{Field, Filter, Mql, Operator, QueryPlan, Value};
 #[cfg(feature = "sql")]
 use mentedb_storage::SqlStorageEngine;
 use mentedb_storage::{Storage, StorageEngine};
@@ -250,6 +251,10 @@ pub struct CognitiveConfig {
     pub speculative_cache_size: usize,
     /// Maximum pain signals to retain.
     pub pain_max_warnings: usize,
+    /// Overfetch factor for vector/tag/temporal searches when a tenant context is
+    /// active. The global in-memory index is not per-tenant, so more candidates
+    /// are requested and post-filtered by space/agent.
+    pub tenant_recall_overfetch_factor: usize,
 }
 
 impl Default for CognitiveConfig {
@@ -272,6 +277,7 @@ impl Default for CognitiveConfig {
             trajectory_max_turns: 100,
             speculative_cache_size: 10,
             pain_max_warnings: 5,
+            tenant_recall_overfetch_factor: 10,
         }
     }
 }
@@ -298,6 +304,10 @@ pub struct MenteDb {
     embedder: Option<Box<dyn EmbeddingProvider>>,
     /// Cognitive engine configuration.
     cognitive_config: CognitiveConfig,
+    /// Optional tenant context. When set, read operations are scoped to this
+    /// space/agent and MQL queries without an explicit tenant filter are
+    /// implicitly restricted to it.
+    tenant: Option<TenantContext>,
     /// Write inference engine for auto-edge creation and contradiction detection.
     write_inference: WriteInferenceEngine,
     /// Decay engine for salience management.
@@ -335,13 +345,22 @@ impl MenteDb {
     /// Opens (or creates) a MenteDB instance using a shared SQL connection.
     #[cfg(feature = "sql")]
     pub fn open_sql(db: Arc<DatabaseConnection>) -> MenteResult<Self> {
+        Self::open_sql_with_tenant(db, None)
+    }
+
+    /// Opens a SQL backed MenteDB instance scoped to a tenant.
+    #[cfg(feature = "sql")]
+    pub fn open_sql_with_tenant(
+        db: Arc<DatabaseConnection>,
+        tenant: Option<TenantContext>,
+    ) -> MenteResult<Self> {
         info!("Opening MenteDB with SQL backend");
         mentedb_storage::ensure_schema_sync(&db).map_err(|e| MenteError::Storage(e.to_string()))?;
         let storage = Storage::Sql(SqlStorageEngine::open(&db)?);
 
         let index = IndexManager::load_from_db(&db).unwrap_or_default();
 
-        let entries = storage.scan_all_memories();
+        let entries = storage.scan_for_tenant(tenant.as_ref().unwrap_or(&TenantContext::default()));
         let mut page_map = HashMap::new();
         for (memory_id, page_id) in &entries {
             page_map.insert(*memory_id, *page_id);
@@ -382,6 +401,7 @@ impl MenteDb {
             path: PathBuf::new(),
             embedder: None,
             cognitive_config,
+            tenant,
             write_inference,
             decay,
             consolidation,
@@ -462,11 +482,25 @@ impl MenteDb {
 
     /// Opens (or creates) a MenteDB instance at the given path.
     pub fn open(path: &Path) -> MenteResult<Self> {
-        Self::open_with_config(path, CognitiveConfig::default())
+        Self::open_with_config_and_tenant(path, CognitiveConfig::default(), None)
+    }
+
+    /// Opens a MenteDB instance at the given path, scoped to a tenant.
+    pub fn open_with_tenant(path: &Path, tenant: Option<TenantContext>) -> MenteResult<Self> {
+        Self::open_with_config_and_tenant(path, CognitiveConfig::default(), tenant)
     }
 
     /// Opens a MenteDB instance with custom cognitive configuration.
     pub fn open_with_config(path: &Path, cognitive_config: CognitiveConfig) -> MenteResult<Self> {
+        Self::open_with_config_and_tenant(path, cognitive_config, None)
+    }
+
+    /// Opens a MenteDB instance with custom cognitive configuration and tenant.
+    pub fn open_with_config_and_tenant(
+        path: &Path,
+        cognitive_config: CognitiveConfig,
+        tenant: Option<TenantContext>,
+    ) -> MenteResult<Self> {
         info!("Opening MenteDB at {}", path.display());
         let storage = Storage::File(StorageEngine::open(path)?);
 
@@ -487,8 +521,12 @@ impl MenteDb {
             GraphManager::new()
         };
 
-        // Rebuild page map by scanning all pages
-        let entries = storage.scan_all_memories();
+        // Rebuild page map by scanning pages for the tenant. The SQL backend
+        // pushes the filter to the database; the file backend returns all pages
+        // and reads are post-filtered by `get_memory`.
+        let default_tenant = TenantContext::default();
+        let tenant_ref = tenant.as_ref().unwrap_or(&default_tenant);
+        let entries = storage.scan_for_tenant(tenant_ref);
         let mut page_map = HashMap::new();
         for (memory_id, page_id) in &entries {
             page_map.insert(*memory_id, *page_id);
@@ -541,6 +579,7 @@ impl MenteDb {
             path: path.to_path_buf(),
             embedder: None,
             cognitive_config,
+            tenant,
             write_inference,
             decay,
             consolidation,
@@ -781,17 +820,21 @@ impl MenteDb {
             query_text.is_some(),
             tags_or
         );
-        // Over-fetch to account for filtered-out results
+        // Over-fetch to account for filtered-out results. When a tenant is
+        // active the global in-memory index is not per-tenant, so we ask for
+        // more candidates and then discard those that belong to other tenants.
+        let overfetch = if self.tenant.is_some() {
+            k * self.cognitive_config.tenant_recall_overfetch_factor
+        } else {
+            k * 3
+        };
         let results = self.index.hybrid_search_with_query_mode(
-            embedding,
-            query_text,
-            tags,
-            tags_or,
-            time_range,
-            k * 3,
+            embedding, query_text, tags, tags_or, time_range, overfetch,
         );
         let graph = self.graph.graph();
         let pm = self.page_map.read();
+        let storage = &self.storage;
+        let tenant = self.tenant;
         let filtered: Vec<(MemoryId, f32)> = results
             .into_iter()
             .filter(|(id, _)| {
@@ -804,11 +847,16 @@ impl MenteDb {
             })
             .filter(|(id, _)| {
                 if let Some(&page_id) = pm.get(id)
-                    && let Ok(node) = self.storage.load_memory(page_id)
+                    && let Ok(node) = storage.load_memory(page_id)
                 {
-                    node.is_valid_at(at)
+                    let tenant_ok = tenant.is_none_or(|t| t.matches(&node));
+                    tenant_ok && node.is_valid_at(at)
                 } else {
-                    true
+                    // Without a tenant context, preserve the old permissive
+                    // behaviour. With a tenant, a missing page means the
+                    // candidate belongs to another space/agent and must be
+                    // dropped.
+                    tenant.is_none()
                 }
             })
             .take(k)
@@ -918,7 +966,15 @@ impl MenteDb {
         Ok(())
     }
 
+    /// Returns true when the node belongs to the configured tenant (if any).
+    fn tenant_matches(&self, node: &MemoryNode) -> bool {
+        self.tenant.is_none_or(|t| t.matches(node))
+    }
+
     /// Retrieves a single memory by its ID.
+    ///
+    /// The returned memory is checked against the tenant context; if it belongs
+    /// to a different space or agent, `MemoryNotFound` is returned.
     pub fn get_memory(&self, id: MemoryId) -> MenteResult<MemoryNode> {
         let page_id = self
             .page_map
@@ -926,7 +982,11 @@ impl MenteDb {
             .get(&id)
             .copied()
             .ok_or(MenteError::MemoryNotFound(id))?;
-        self.storage.load_memory(page_id)
+        let node = self.storage.load_memory(page_id)?;
+        if !self.tenant_matches(&node) {
+            return Err(MenteError::MemoryNotFound(id));
+        }
+        Ok(node)
     }
 
     /// Returns all memory IDs currently stored in the database.
@@ -1444,50 +1504,65 @@ impl MenteDb {
         Ok(())
     }
 
+    /// Multiplicative overfetch to use when a tenant context is active.
+    fn tenant_overfetch(&self, k: usize) -> usize {
+        if self.tenant.is_some() {
+            k * self.cognitive_config.tenant_recall_overfetch_factor
+        } else {
+            k
+        }
+    }
+
     /// Executes a query plan against the indexes and graph, returning scored memories.
     fn execute_plan(&self, plan: &QueryPlan) -> MenteResult<Vec<ScoredMemory>> {
         match plan {
-            QueryPlan::VectorSearch { query, k, .. } => {
-                let hits = self.index.hybrid_search(query, None, None, *k);
-                self.load_scored_memories(&hits)
+            QueryPlan::VectorSearch { query, k, filters } => {
+                let hits = self
+                    .index
+                    .hybrid_search(query, None, None, self.tenant_overfetch(*k));
+                self.load_scored_memories(&hits, filters)
             }
-            QueryPlan::TagScan { tags, limit, .. } => {
+            QueryPlan::TagScan {
+                tags,
+                limit,
+                filters,
+            } => {
                 let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
                 let k = limit.unwrap_or(10);
                 // Use a zero-vector for tag-only search; salience+bitmap still apply.
-                let hits = self.index.hybrid_search(&[], Some(&tag_refs), None, k);
-                self.load_scored_memories(&hits)
+                let hits =
+                    self.index
+                        .hybrid_search(&[], Some(&tag_refs), None, self.tenant_overfetch(k));
+                self.load_scored_memories(&hits, filters)
             }
-            QueryPlan::TemporalScan { start, end, .. } => {
-                let hits = self
-                    .index
-                    .hybrid_search(&[], None, Some((*start, *end)), 100);
-                self.load_scored_memories(&hits)
+            QueryPlan::TemporalScan {
+                start,
+                end,
+                filters,
+            } => {
+                let hits = self.index.hybrid_search(
+                    &[],
+                    None,
+                    Some((*start, *end)),
+                    self.tenant_overfetch(100),
+                );
+                self.load_scored_memories(&hits, filters)
             }
             QueryPlan::GraphTraversal { start, depth, .. } => {
                 let (ids, _edges) = self.graph.get_context_subgraph(*start, *depth);
-                let pm = self.page_map.read();
-                let scored: Vec<ScoredMemory> = ids
-                    .iter()
-                    .filter_map(|id| {
-                        pm.get(id).and_then(|&pid| {
-                            self.storage.load_memory(pid).ok().map(|node| ScoredMemory {
-                                memory: node,
-                                score: 1.0,
-                            })
-                        })
-                    })
-                    .collect();
+                let mut scored = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    if let Ok(node) = self.get_memory(*id) {
+                        scored.push(ScoredMemory {
+                            memory: node,
+                            score: 1.0,
+                        });
+                    }
+                }
                 Ok(scored)
             }
             QueryPlan::PointLookup { id } => {
-                let page_id = self
-                    .page_map
-                    .read()
-                    .get(id)
-                    .copied()
-                    .ok_or(MenteError::MemoryNotFound(*id))?;
-                let node = self.storage.load_memory(page_id)?;
+                let node = self.get_memory(*id)?;
                 Ok(vec![ScoredMemory {
                     memory: node,
                     score: 1.0,
@@ -1497,11 +1572,80 @@ impl MenteDb {
         }
     }
 
+    /// Returns true when a node satisfies all MQL filters.
+    ///
+    /// The default tenant context is applied first, then explicit filters from
+    /// the query. Filters on unsupported fields are ignored for now.
+    fn node_matches_filters(&self, node: &MemoryNode, filters: &[Filter]) -> bool {
+        if !self.tenant_matches(node) {
+            return false;
+        }
+        for f in filters {
+            match f.field {
+                Field::Space => {
+                    if let Value::Uuid(uuid) = f.value {
+                        let ok = match f.op {
+                            Operator::Eq => node.space_id == uuid.into(),
+                            Operator::Neq => node.space_id != uuid.into(),
+                            _ => true,
+                        };
+                        if !ok {
+                            return false;
+                        }
+                    }
+                }
+                Field::Agent => {
+                    if let Value::Uuid(uuid) = f.value {
+                        let ok = match f.op {
+                            Operator::Eq => node.agent_id == uuid.into(),
+                            Operator::Neq => node.agent_id != uuid.into(),
+                            _ => true,
+                        };
+                        if !ok {
+                            return false;
+                        }
+                    }
+                }
+                Field::Type => {
+                    if let Value::MemoryType(mt) = f.value {
+                        let ok = match f.op {
+                            Operator::Eq => node.memory_type == mt,
+                            Operator::Neq => node.memory_type != mt,
+                            _ => true,
+                        };
+                        if !ok {
+                            return false;
+                        }
+                    }
+                }
+                Field::Tag => {
+                    if let Value::Text(ref t) = f.value {
+                        let has = node.tags.contains(t);
+                        let ok = match f.op {
+                            Operator::Eq => has,
+                            Operator::Neq => !has,
+                            _ => true,
+                        };
+                        if !ok {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Loads MemoryNodes from storage and pairs them with their search scores.
     ///
     /// When decay is enabled, salience is recomputed and factored into the
     /// final score to prioritize temporally relevant memories.
-    fn load_scored_memories(&self, hits: &[(MemoryId, f32)]) -> MenteResult<Vec<ScoredMemory>> {
+    fn load_scored_memories(
+        &self,
+        hits: &[(MemoryId, f32)],
+        filters: &[Filter],
+    ) -> MenteResult<Vec<ScoredMemory>> {
         let pm = self.page_map.read();
         let now = if self.cognitive_config.decay_on_recall {
             std::time::SystemTime::now()
@@ -1516,6 +1660,7 @@ impl MenteDb {
         for &(id, score) in hits {
             if let Some(&page_id) = pm.get(&id)
                 && let Ok(node) = self.storage.load_memory(page_id)
+                && self.node_matches_filters(&node, filters)
             {
                 let final_score = if self.cognitive_config.decay_on_recall {
                     let decayed_salience = self.decay.compute_decay(

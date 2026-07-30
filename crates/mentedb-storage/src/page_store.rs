@@ -4,6 +4,7 @@ use crate::entity::mtdb_page;
 use crate::serde_compat;
 use mentedb_core::MemoryNode;
 use mentedb_core::error::{MenteError, MenteResult};
+use mentedb_core::space::TenantContext;
 use mentedb_core::types::MemoryId;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
@@ -136,9 +137,22 @@ impl SqlPageStore {
     }
 
     pub fn scan_all(&self) -> MenteResult<Vec<(MemoryId, i64)>> {
+        self.scan_for_tenant(&TenantContext::default())
+    }
+
+    pub fn scan_for_tenant(&self, tenant: &TenantContext) -> MenteResult<Vec<(MemoryId, i64)>> {
+        let mut query = mtdb_page::Entity::find();
+        if let Some(space_id) = tenant.space_id {
+            let s = space_id.to_string();
+            query = query.filter(mtdb_page::Column::SpaceId.eq(&s));
+        }
+        if let Some(agent_id) = tenant.agent_id {
+            let a = agent_id.to_string();
+            query = query.filter(mtdb_page::Column::AgentId.eq(&a));
+        }
+
         let models: Vec<mtdb_page::Model> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { mtdb_page::Entity::find().all(&*self.db).await })
+            tokio::runtime::Handle::current().block_on(async { query.all(&*self.db).await })
         })
         .map_err(|e: DbErr| MenteError::Storage(e.to_string()))?;
 
@@ -149,6 +163,36 @@ impl SqlPageStore {
             }
         }
         Ok(results)
+    }
+
+    pub fn read_by_memory_id_for_tenant(
+        &self,
+        memory_id: MemoryId,
+        tenant: &TenantContext,
+    ) -> MenteResult<Option<MemoryNode>> {
+        let mid_str = memory_id.to_string();
+        let mut query = mtdb_page::Entity::find().filter(mtdb_page::Column::MemoryId.eq(&mid_str));
+        if let Some(space_id) = tenant.space_id {
+            let s = space_id.to_string();
+            query = query.filter(mtdb_page::Column::SpaceId.eq(&s));
+        }
+        if let Some(agent_id) = tenant.agent_id {
+            let a = agent_id.to_string();
+            query = query.filter(mtdb_page::Column::AgentId.eq(&a));
+        }
+
+        let model: Option<mtdb_page::Model> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { query.one(&*self.db).await })
+        })
+        .map_err(|e: DbErr| MenteError::Storage(e.to_string()))?;
+
+        match model {
+            Some(m) => {
+                let embedding = m.embedding.unwrap_or_default();
+                Ok(Some(serde_compat::deserialize_node(&m.data, &embedding)?))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn page_count(&self) -> MenteResult<u64> {

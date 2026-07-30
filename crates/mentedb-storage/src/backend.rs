@@ -9,6 +9,7 @@
 use mentedb_core::MemoryNode;
 use mentedb_core::edge::MemoryEdge;
 use mentedb_core::error::MenteResult;
+use mentedb_core::space::TenantContext;
 use mentedb_core::types::MemoryId;
 
 use crate::engine::StorageEngine;
@@ -78,6 +79,16 @@ impl Storage {
 
     /// Enumerate every stored memory with its handle.
     pub fn scan_all_memories(&self) -> Vec<(MemoryId, PageRef)> {
+        self.scan_for_tenant(&TenantContext::default())
+    }
+
+    /// Enumerate stored memories belonging to the given tenant.
+    ///
+    /// The SQL backend filters at the database level. The file backend does not
+    /// support tenant-scoped scans, so it falls back to a global scan; callers
+    /// must post-filter when running multi-tenant workloads on the file engine.
+    pub fn scan_for_tenant(&self, tenant: &TenantContext) -> Vec<(MemoryId, PageRef)> {
+        let _ = tenant; // used by the SQL backend; ignored by the file backend
         match self {
             Storage::File(e) => e
                 .scan_all_memories()
@@ -86,7 +97,7 @@ impl Storage {
                 .collect(),
             #[cfg(feature = "sql")]
             Storage::Sql(e) => e
-                .scan_all_memories()
+                .scan_memories_for_tenant(tenant)
                 .into_iter()
                 .map(|(id, p)| (id, p as PageRef))
                 .collect(),

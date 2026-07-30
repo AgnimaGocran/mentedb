@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mentedb_core::MemoryNode;
 use mentedb_core::edge::MemoryEdge;
 use mentedb_core::error::MenteResult;
+use mentedb_core::space::TenantContext;
 use mentedb_core::types::MemoryId;
 use sea_orm::DatabaseConnection;
 use tracing::info;
@@ -65,11 +66,23 @@ impl SqlStorageEngine {
     }
 
     pub fn load_memory_by_uuid(&self, memory_id: MemoryId) -> MenteResult<Option<MemoryNode>> {
-        self.store.read_by_memory_id(memory_id)
+        self.load_memory_by_uuid_for_tenant(memory_id, &TenantContext::default())
+    }
+
+    pub fn load_memory_by_uuid_for_tenant(
+        &self,
+        memory_id: MemoryId,
+        tenant: &TenantContext,
+    ) -> MenteResult<Option<MemoryNode>> {
+        self.store.read_by_memory_id_for_tenant(memory_id, tenant)
     }
 
     pub fn scan_all_memories(&self) -> Vec<(MemoryId, PageId)> {
-        self.store.scan_all().unwrap_or_default()
+        self.scan_memories_for_tenant(&TenantContext::default())
+    }
+
+    pub fn scan_memories_for_tenant(&self, tenant: &TenantContext) -> Vec<(MemoryId, PageId)> {
+        self.store.scan_for_tenant(tenant).unwrap_or_default()
     }
 
     pub fn checkpoint(&self) -> MenteResult<()> {

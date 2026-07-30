@@ -35,5 +35,5 @@ pub use limits::{ResourceLimits, ResourceTracker};
 pub use memory::MemoryNode;
 pub use metrics::Metrics;
 pub use mvcc::{Version, VersionStore};
-pub use space::{MemorySpace, Permission, SpaceManager};
+pub use space::{MemorySpace, Permission, SpaceManager, TenantContext};
 pub use tier::MemoryTier;
