@@ -219,7 +219,11 @@ impl MenteDb {
         input: &ProcessTurnInput,
         delta_tracker: &mut DeltaTracker,
     ) -> crate::MenteResult<ProcessTurnResult> {
-        let agent_id = AgentId(input.agent_id.unwrap_or(Uuid::nil()));
+        // When the database is scoped to a tenant, the tenant's agent id takes
+        // precedence. This keeps all writes (episodic, facts, corrections,
+        // ghosts) inside the user's isolated space.
+        let input_agent = AgentId(input.agent_id.unwrap_or(Uuid::nil()));
+        let agent_id = self.tenant.and_then(|t| t.agent_id).unwrap_or(input_agent);
         let assistant_resp = input.assistant_response.as_deref().unwrap_or("");
         let conversation = format!(
             "User: {}\nAssistant: {}",

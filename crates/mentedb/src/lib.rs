@@ -93,6 +93,8 @@ pub use mentedb_consolidation as consolidation;
 pub use mentedb_context as context;
 /// Core types: MemoryNode, MemoryEdge, errors, config.
 pub use mentedb_core as core;
+/// Embedding providers and embedding cache.
+pub use mentedb_embedding as embedding;
 /// Knowledge graph engine.
 pub use mentedb_graph as graph;
 /// Index structures for vector, tag, temporal, and salience search.
@@ -653,7 +655,24 @@ impl MenteDb {
     /// - Create relationship edges (Related, Supersedes, Contradicts)
     /// - Invalidate superseded memories
     /// - Propagate confidence changes through the graph
+    ///
+    /// Stamp the active tenant's `space_id` and `agent_id` onto a node before
+    /// it is persisted. When a tenant is active, all writes are scoped to it.
+    fn apply_tenant(&self, node: &mut MemoryNode) {
+        if let Some(tenant) = self.tenant {
+            if let Some(space_id) = tenant.space_id {
+                node.space_id = space_id;
+            }
+            if let Some(agent_id) = tenant.agent_id {
+                node.agent_id = agent_id;
+            }
+        }
+    }
+
     pub fn store(&self, node: MemoryNode) -> MenteResult<()> {
+        let mut node = node;
+        self.apply_tenant(&mut node);
+
         let id = node.id;
         debug!("Storing memory {}", id);
 
@@ -686,8 +705,13 @@ impl MenteDb {
     /// Uses a single WAL lock for all writes, avoiding per-write overhead of
     /// flock acquisition, header reload, and LSN scan. Significantly faster
     /// for bulk inserts.
-    pub fn store_batch(&self, nodes: Vec<MemoryNode>) -> MenteResult<Vec<MemoryId>> {
-        // Validate all embeddings upfront
+    pub fn store_batch(&self, mut nodes: Vec<MemoryNode>) -> MenteResult<Vec<MemoryId>> {
+        // Stamp the active tenant onto each node before validating.
+        for node in &mut nodes {
+            self.apply_tenant(node);
+        }
+
+        // Validate all embeddings upfront.
         for node in &nodes {
             if self.embedding_dim > 0
                 && !node.embedding.is_empty()
